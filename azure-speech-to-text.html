@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Azure Speech to Text</title>
+
+  <!-- Bootstrap 5 via CDN -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+
+  <!-- SDK oficial do Azure Speech Services para navegador -->
+  <script src="https://aka.ms/csspeech/jsbrowserpackageraw"></script>
+
+  <style>
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 12px;
+      background: #f1f3f5;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+
+    .speech-card {
+      width: 100%;
+      max-width: 760px;
+      border: 0;
+      border-radius: 18px;
+      box-shadow: 0 12px 35px rgba(0, 0, 0, .10);
+    }
+
+    .status-dot {
+      display: inline-block;
+      width: 13px;
+      height: 13px;
+      margin-right: 9px;
+      border-radius: 50%;
+      background: #6c757d;
+      vertical-align: middle;
+      transition: background-color .2s ease, box-shadow .2s ease;
+    }
+
+    .status-dot.listening {
+      background: #198754;
+      box-shadow: 0 0 0 5px rgba(25, 135, 84, .15);
+      animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+      50% { box-shadow: 0 0 0 9px rgba(25, 135, 84, 0); }
+    }
+
+    #recognizedText {
+      min-height: 230px;
+      resize: vertical;
+      line-height: 1.6;
+      background: #fff;
+    }
+
+    .status-label { font-weight: 600; }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <section class="card speech-card mx-auto">
+      <div class="card-body p-4 p-md-5">
+        <h1 class="text-center h2 fw-bold mb-4">Azure Speech to Text</h1>
+
+        <div class="d-flex justify-content-center align-items-center mb-4"
+             role="status" aria-live="polite">
+          <span id="statusDot" class="status-dot" aria-hidden="true"></span>
+          <span id="statusText" class="status-label">Parado</span>
+        </div>
+
+        <label for="recognizedText" class="form-label fw-semibold">
+          Texto reconhecido
+        </label>
+        <textarea
+          id="recognizedText"
+          class="form-control mb-4"
+          placeholder="O texto reconhecido será exibido aqui..."
+          readonly
+          aria-label="Texto reconhecido pela fala"
+        ></textarea>
+
+        <div class="d-flex flex-column flex-sm-row justify-content-center gap-2">
+          <button id="startButton" class="btn btn-primary px-4" type="button">
+            <span class="me-1">▶</span> Iniciar
+          </button>
+          <button id="stopButton" class="btn btn-outline-danger px-4"
+                  type="button" disabled>
+            <span class="me-1">■</span> Parar
+          </button>
+        </div>
+
+        <p id="message" class="text-center text-secondary small mt-3 mb-0"
+           aria-live="polite">
+          Clique em Iniciar e permita o acesso ao microfone.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    "use strict";
+
+    // ============================================================
+    // CONFIGURAÇÕES DO SERVIÇO AZURE
+    // Insira aqui a chave e a região do seu recurso Azure Speech.
+    // Nunca publique sua chave em um site aberto ou repositório público.
+    // Para produção, prefira obter um token temporário por um backend.
+    // ============================================================
+    const subscriptionKey = "COLOQUE_SUA_CHAVE_AZURE_AQUI";
+    const serviceRegion = "COLOQUE_SUA_REGIAO_AQUI"; // Ex.: brazilsouth
+
+    // Elementos da interface
+    const startButton = document.getElementById("startButton");
+    const stopButton = document.getElementById("stopButton");
+    const statusDot = document.getElementById("statusDot");
+    const statusText = document.getElementById("statusText");
+    const recognizedText = document.getElementById("recognizedText");
+    const message = document.getElementById("message");
+
+    // textoFinal guarda somente os resultados confirmados.
+    // textoParcial é temporário e nunca é incorporado a textoFinal.
+    let textoFinal = "";
+    let textoParcial = "";
+    let speechRecognizer = null;
+    let audioConfig = null;
+    let isListening = false;
+
+    // Identificadores de resultados já processados ajudam a evitar
+    // que um mesmo evento final seja acrescentado duas vezes.
+    let processedResults = new Set();
+
+    // Atualiza o textarea sempre com finais + parcial atual.
+    function atualizarTexto() {
+      recognizedText.value = textoFinal + textoParcial;
+      recognizedText.scrollTop = recognizedText.scrollHeight;
+    }
+
+    // ============================================================
+    // CONTROLE DE STATUS VISUAL E DOS BOTÕES
+    // ============================================================
+    function atualizarStatus(escutando) {
+      isListening = escutando;
+      statusDot.classList.toggle("listening", escutando);
+      statusText.textContent = escutando ? "Escutando..." : "Parado";
+      startButton.disabled = escutando;
+      stopButton.disabled = !escutando;
+    }
+
+    function liberarRecursos() {
+      if (speechRecognizer) {
+        speechRecognizer.close();
+        speechRecognizer = null;
+      }
+      if (audioConfig) {
+        audioConfig.close();
+        audioConfig = null;
+      }
+    }
+
+    // ============================================================
+    // INÍCIO DO RECONHECIMENTO CONTÍNUO
+    // ============================================================
+    async function iniciarReconhecimento() {
+      if (isListening) return;
+
+      if (!window.SpeechSDK) {
+        message.textContent = "Não foi possível carregar o SDK do Azure Speech.";
+        return;
+      }
+
+      if (
+        !subscriptionKey || subscriptionKey === "COLOQUE_SUA_CHAVE_AZURE_AQUI" ||
+        !serviceRegion || serviceRegion === "COLOQUE_SUA_REGIAO_AQUI"
+      ) {
+        message.textContent = "Configure a chave e a região do Azure no código antes de iniciar.";
+        return;
+      }
+
+      // Uma nova sessão começa com o campo e os acumuladores limpos.
+      textoFinal = "";
+      textoParcial = "";
+      processedResults.clear();
+      atualizarTexto();
+
+      try {
+        // Configura o serviço Azure e o idioma português do Brasil.
+        const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
+          subscriptionKey,
+          serviceRegion
+        );
+        speechConfig.speechRecognitionLanguage = "pt-BR";
+
+        // Captura o áudio do microfone padrão do navegador.
+        audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+        speechRecognizer = new SpeechSDK.SpeechRecognizer(
+          speechConfig,
+          audioConfig
+        );
+
+        // Evento de reconhecimento parcial: exibe em tempo real,
+        // mas não salva o conteúdo em textoFinal.
+        speechRecognizer.recognizing = (sender, event) => {
+          if (event.result && event.result.text) {
+            textoParcial = event.result.text;
+            atualizarTexto();
+          }
+        };
+
+        // Evento de reconhecimento final: somente aqui o texto é
+        // acumulado permanentemente na variável textoFinal.
+        speechRecognizer.recognized = (sender, event) => {
+          if (
+            event.result &&
+            event.result.reason === SpeechSDK.ResultReason.RecognizedSpeech &&
+            event.result.text
+          ) {
+            const resultado = event.result.text.trim();
+            const identificador = [
+              event.result.offset,
+              event.result.duration,
+              resultado
+            ].join("|");
+
+            if (resultado && !processedResults.has(identificador)) {
+              processedResults.add(identificador);
+              textoFinal += (textoFinal ? " " : "") + resultado;
+            }
+
+            // Remove a prévia após a confirmação do resultado.
+            textoParcial = "";
+            atualizarTexto();
+          } else if (
+            event.result &&
+            event.result.reason === SpeechSDK.ResultReason.NoMatch
+          ) {
+            textoParcial = "";
+            atualizarTexto();
+          }
+        };
+
+        // Tratamento de cancelamentos e erros informados pelo SDK.
+        speechRecognizer.canceled = (sender, event) => {
+          console.error("Reconhecimento cancelado:", event);
+          message.textContent = event.errorDetails
+            ? "Reconhecimento cancelado: " + event.errorDetails
+            : "Reconhecimento cancelado.";
+          pararReconhecimento();
+        };
+
+        speechRecognizer.sessionStopped = () => {
+          if (isListening) {
+            atualizarStatus(false);
+            textoParcial = "";
+            atualizarTexto();
+            liberarRecursos();
+          }
+        };
+
+        // Inicia o reconhecimento contínuo (não apenas uma frase).
+        speechRecognizer.startContinuousRecognitionAsync(
+          () => {
+            atualizarStatus(true);
+            message.textContent = "Microfone ativo. Fale em português.";
+          },
+          (error) => {
+            console.error("Erro ao iniciar:", error);
+            message.textContent = "Não foi possível iniciar: " + error;
+            atualizarStatus(false);
+            liberarRecursos();
+          }
+        );
+      } catch (error) {
+        console.error(error);
+        message.textContent = "Erro ao configurar o reconhecimento: " + error.message;
+        atualizarStatus(false);
+        liberarRecursos();
+      }
+    }
+
+    // ============================================================
+    // PARADA DO RECONHECIMENTO
+    // ============================================================
+    function pararReconhecimento() {
+      if (!speechRecognizer) {
+        atualizarStatus(false);
+        textoParcial = "";
+        atualizarTexto();
+        liberarRecursos();
+        return;
+      }
+
+      const recognizerAtual = speechRecognizer;
+      atualizarStatus(false);
+      textoParcial = "";
+      atualizarTexto();
+      message.textContent = "Reconhecimento parado.";
+
+      // Solicita ao SDK que encerre a sessão contínua.
+      recognizerAtual.stopContinuousRecognitionAsync(
+        () => {
+          liberarRecursos();
+        },
+        (error) => {
+          console.error("Erro ao parar:", error);
+          message.textContent = "Ocorreu um erro ao parar: " + error;
+          liberarRecursos();
+        }
+      );
+    }
+
+    // Eventos dos botões
+    startButton.addEventListener("click", iniciarReconhecimento);
+    stopButton.addEventListener("click", pararReconhecimento);
+
+    // Estado inicial da interface
+    atualizarStatus(false);
+  </script>
+</body>
+</html>
